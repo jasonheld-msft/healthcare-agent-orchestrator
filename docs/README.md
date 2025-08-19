@@ -5,14 +5,18 @@ Consult the main [README](../README.md) for general information about the projec
 ## General Documentation
 - [User Guide](./user_guide.md): Step-by-step instructions for using the Healthcare Agent Orchestrator
 - [Microsoft Teams](./teams.md): Setting up and configuring Teams integration for collaborative workflows
+- [React Chat Client](./chatclient.md): Instructions for using the React client application instead of Teams
 - [Data Ingestion](./data_ingestion.md): How to import and process patient data in the system
+- [FHIR Integration](./fhir_integration.md): EHR integration via HL7® FHIR for retrieving clinical notes
+- [Microsoft Fabric Integration](./fabric/fabric_integration.md): Healthcare data solutions integration with Microsoft Fabric
 - [Evaluation](./evaluation.md): Methods for measuring and improving agent performance
 - [Infrastructure](./infra.md): Additional infrastructure information including how to enable secure file downloads with SSO authentication
-- [Network Architecture](./network.md) for network configuration and security
-- [Access Control](./access_control.md) Restrict access to deployed agents.
+- [Network Architecture](./network.md): Network configuration and security
+- [Access Control](./access_control.md): Restrict access to deployed agents
 
 ## Developer Documentation
 - [Agent Development](./agent_development.md): Creating and customizing specialized healthcare agents
+- [Data Access Layer](./data_access.md): Design and implementation of the data access layer for patient data
 - [Scenarios](./scenarios.md): Example healthcare workflows and implementation guidelines
 - [MCP and Copilot](./mcp.md): Microsoft Cloud for Healthcare and Copilot Studio integration
 

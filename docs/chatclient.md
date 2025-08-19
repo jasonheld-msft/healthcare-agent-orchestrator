@@ -1,3 +1,5 @@
+# React Chat Client
+
 If you want to use the React client application instead of Teams, follow these steps:
 
 1. Navigate to the democlient directory:

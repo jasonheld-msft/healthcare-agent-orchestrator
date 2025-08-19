@@ -1,18 +1,18 @@
-## Microsoft Fabric + healthcare data solutions (HDS) Integration
+# Microsoft Fabric + healthcare data solutions (HDS) Integration
 
-### Overview
+## Overview
 This user guide provides instructions for integrating AI agents with [healthcare data solutions (HDS) on Microsoft Fabric](https://learn.microsoft.com/en-us/industry/healthcare/healthcare-data-solutions/overview). Microsoft Fabric provides a comprehensive ecosystem for data integration, data engineering, real-time analytics, data science, and business intelligence. Healthcare data solutions (HDS) is built on Fabric and provides several capabilities making it easy to manage and analyze your multi-modal healthcare data. 
 
 Healthcare data solutions (HDS) supports both FHIR and OMOP, but will use FHIR in this example. The changes required to use FHIR are trivial and will be covered briefly in this doc.
 
-### What is healthcare data solutions (HDS) on Fabric?
+## What is healthcare data solutions (HDS) on Fabric?
 
 Healthcare Data Solutions (HDS) in Microsoft Fabric is an end-to-end analytics SaaS platform that enables you to ingest, store, and analyze healthcare data from various sources. HDS provides standardized data models and transformation tools to help create a multi-modal healthcare data warehouse, supporting industry standards like FHIR and DICOM, and ensuring compliance with regulations such as HIPAA and GDPR. HDS also has a growing list AI capabilities to generate and manage AI artifacts, like support for [Dragon Ambient eXperience (DAX) Copilot](https://learn.microsoft.com/en-us/industry/healthcare/dax-copilot-integration/overview?toc=%2Findustry%2Fhealthcare%2Ftoc.json&bc=%2Findustry%2Fbreadcrumb%2Ftoc.json), making it ideal to serve as the data layer for Agentic systems.
 
 Below shows a sample data flow and use cases that HDS unlocks, going from raw FHIR ingestion to dynamic PowerBI reports.
 ![alt text](fabric_hds_pipeline.png)
 
-### Prerequisites
+## Prerequisites
 
 The assumption is that you have already deployed Healthcare Agent Orchestrator (HAO) using the default blob storage. Additionally, it is expected you have already onboarded to Fabric and have a baseline understanding of its features and terminiology. More information can be found [here]().
 
@@ -117,7 +117,7 @@ You can add the 'Orchestrator' identity to your Fabric Workspace by going to the
 ![](managed_identity.png)
 
 
-## Redploy the solution
+## Redeploy the solution
 
 There are two small changes that need to be made before redeploying:
 

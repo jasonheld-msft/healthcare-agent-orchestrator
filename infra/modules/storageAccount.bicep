@@ -9,6 +9,7 @@ param location string
 
 param tags object = {}
 param grantAccessTo array = []
+param enablePrivateConnectivity bool = false
 
 resource sa 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: storageAccountName
@@ -23,6 +24,7 @@ resource sa 'Microsoft.Storage/storageAccounts@2023-01-01' = {
     accessTier: 'Hot'
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
+    publicNetworkAccess: enablePrivateConnectivity ? 'Disabled' : 'Enabled'
   }
 }
 

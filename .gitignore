@@ -19,5 +19,6 @@ output
 
 src/public/output_data
 infra/config
+infra/main.json
 data
 .env.production

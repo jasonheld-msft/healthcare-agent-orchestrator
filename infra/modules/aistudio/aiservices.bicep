@@ -6,6 +6,7 @@ param aiServicesName string
 param tags object = {}
 param grantAccessTo array
 param additionalIdentities array = []
+param enablePrivateConnectivity bool = false
 
 var access = [for i in range(0, length(additionalIdentities)): {
   id: additionalIdentities[i]
@@ -27,9 +28,10 @@ resource aiServices 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
   properties: {
     disableLocalAuth: true
     customSubDomainName: aiServicesName
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: enablePrivateConnectivity ? 'Disabled' : 'Enabled'
+    // When using private endpoints, public network access is disabled; otherwise allow by default
     networkAcls: {
-      defaultAction: 'Allow' 
+      defaultAction: enablePrivateConnectivity ? 'Deny' : 'Allow'
     }
   }
   tags: tags

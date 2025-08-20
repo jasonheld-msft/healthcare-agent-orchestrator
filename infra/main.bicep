@@ -12,6 +12,10 @@ param myPrincipalId string = ''
 param myPrincipalType string
 @description('Tags for all AI resources created. JSON object')
 param tags object = {}
+@description('Enable private connectivity (VNet integration and restricted access). When true, services lock down to VNet.')
+param enablePrivateConnectivity bool = false
+@description('Route Teams/Bot ingress via Azure Front Door with Private Link to App Service. Disables App Service Private Endpoint and sets site public access to Disabled.')
+param useFrontDoorForBots bool = false
 
 // AI Services configurations
 @description('Name of the AI Services account. Automatically generated if left blank')
@@ -96,6 +100,19 @@ param fabricUserDataFunctionEndpoint string = ''
 
 @description('Name of the Application Insights instance. Automatically generated if left blank')
 param appInsightsName string = ''
+
+// Optional P2S VPN Gateway configuration
+@description('Deploy a Point-to-Site VPN gateway to enable private access from developer machines')
+param deployP2SVpn bool = false
+@description('SKU for the VPN gateway (e.g., VpnGw1, VpnGw2, VpnGw3)')
+@allowed(['VpnGw1','VpnGw2','VpnGw3','VpnGw4','VpnGw5'])
+param vpnGatewaySku string = 'VpnGw1'
+@description('Client address pool for P2S VPN (CIDR)')
+param vpnClientAddressPool string = '172.16.0.0/24'
+@description('Optional: Name of the root certificate for P2S certificate authentication')
+param vpnRootCertName string = ''
+@description('Optional: Base64-encoded public certificate data for P2S root certificate')
+param vpnRootCertData string = ''
 
 var modelName = split(model, ';')[0]
 var modelVersion = split(model, ';')[1]
@@ -188,6 +205,17 @@ param subnets array = [
   }
 ]
 
+var effectiveSubnets = enablePrivateConnectivity ? concat(subnets, [
+  {
+    name: 'private-endpoints'
+    addressPrefix: '10.0.2.0/24'
+    delegation: ''
+    serviceEndpoints: []
+    securityRules: []
+    privateEndpointNetworkPolicies: 'Disabled'
+  }
+]) : subnets
+
 var names = {
   msi: !empty(msiName) ? msiName : '${abbrs.managedIdentityUserAssignedIdentities}${environmentName}-${uniqueSuffix}'
   appPlan: !empty(appPlanName) ? appPlanName : '${abbrs.webSitesAppServiceEnvironment}${environmentName}-${uniqueSuffix}'
@@ -214,7 +242,6 @@ var allAgents = agentConfigs[scenario]
 var agents = allAgents
 
 var healthcareAgents = filter(allAgents, agent => contains(agent, 'healthcare_agent'))
-var hasHealthcareAgentNeedingRadiologyModels = contains(map(healthcareAgents, agent => toLower(agent.name)), 'radiology')
 var hasHlsModelEndpoints = !empty(hlsModelEndpoints.cxr_report_gen)
 
 module m_appServicePlan 'modules/appserviceplan.bicep' = {
@@ -233,9 +260,43 @@ module m_network 'modules/network.bicep' = {
     location: empty(appServiceLocation) ? location : appServiceLocation
     vnetName: names.vnet
     vnetAddressPrefixes: vnetAddressPrefixes
-    subnets: subnets
+    subnets: effectiveSubnets
     tags: tags
   }
+}
+
+// Optional modules for VPN Gateway and DNS Private Resolver
+module m_vpngw 'modules/vpnGateway.bicep' = if (deployP2SVpn) {
+  name: 'deploy_vpn_gw'
+  params: {
+    location: location
+    vnetName: names.vnet
+    gatewaySubnetPrefix: '10.0.4.0/26'
+    vpnGatewaySku: vpnGatewaySku
+    vpnClientAddressPool: vpnClientAddressPool
+    vpnRootCertName: vpnRootCertName
+    vpnRootCertData: vpnRootCertData
+    tags: tags
+  }
+  dependsOn: [
+    m_network
+  ]
+}
+
+@description('Deploy DNS Private Resolver to enable DNS for privatelink zones over VPN')
+param deployDnsResolver bool = false
+
+module m_dnsResolver 'modules/dnsResolver.bicep' = if (deployDnsResolver) {
+  name: 'deploy_dns_resolver'
+  params: {
+    location: location
+    vnetName: names.vnet
+    inboundSubnetPrefix: '10.0.6.0/26'
+    tags: tags
+  }
+  dependsOn: [
+    m_network
+  ]
 }
 
 module m_msi 'modules/msi.bicep' =[for i in agents:  {
@@ -267,6 +328,7 @@ module m_aiservices 'modules/aistudio/aiservices.bicep' = {
     additionalIdentities: [
       for i in range(0, length(agents)): m_msi[i].outputs.msiPrincipalID
     ]
+  enablePrivateConnectivity: enablePrivateConnectivity
   }
 }
 
@@ -275,7 +337,7 @@ module m_keyVault 'modules/aistudio/keyVault.bicep' = {
   params: {
     location: empty(keyVaultLocation) ? location : keyVaultLocation
     keyVaultName: names.keyVault
-    appServiceSubnetId: m_network.outputs.appServiceSubnetId
+    appServiceSubnetId: enablePrivateConnectivity ? m_network.outputs.appServiceSubnetId : ''
     grantAccessTo: [
         {
           id: myPrincipalId
@@ -283,6 +345,7 @@ module m_keyVault 'modules/aistudio/keyVault.bicep' = {
         }
       ]
     tags: tags
+    enablePrivateConnectivity: enablePrivateConnectivity
     additionalIdentities: [
       for i in range(0, length(agents)): m_msi[i].outputs.msiPrincipalID
     ]
@@ -318,7 +381,7 @@ module hlsModels 'modules/hlsModel.bicep' = if (!hasHlsModelEndpoints) {
     location: empty(hlsDeploymentLocation) ? location : hlsDeploymentLocation
     workspaceName: 'cog-ai-prj-${environmentName}-${uniqueSuffix}'
     instanceType: instanceType
-    includeRadiologyModels: empty(healthcareAgents) ? true : !hasHealthcareAgentNeedingRadiologyModels
+    includeRadiologyModels: false //empty(healthcareAgents) ? true : !hasHealthcareAgentNeedingRadiologyModels
   }
   dependsOn: [
     m_aihub
@@ -341,6 +404,7 @@ module m_appStorageAccount 'modules/storageAccount.bicep' = {
   params: {
     location: empty(storageAccountLocation) ? location : storageAccountLocation
     storageAccountName: names.appStorage
+    enablePrivateConnectivity: enablePrivateConnectivity
     grantAccessTo: [
       {
         id: myPrincipalId
@@ -354,6 +418,279 @@ module m_appStorageAccount 'modules/storageAccount.bicep' = {
     tags: tags
   }
 }
+// Build private DNS zone names using environment() suffixes to avoid hardcoding cloud-specific domains
+var keyVaultDnsRaw = environment().suffixes.keyvaultDns
+var keyVaultDns = startsWith(keyVaultDnsRaw, '.') ? substring(keyVaultDnsRaw, 1) : keyVaultDnsRaw
+var keyVaultPrivateDns = replace(keyVaultDns, 'vault.', 'vaultcore.')
+var blobPrivateZoneName = 'privatelink.blob.${environment().suffixes.storage}'
+var kvPrivateZoneName = 'privatelink.${keyVaultPrivateDns}'
+var cognitivePrivateZoneName = 'privatelink.cognitiveservices.azure.com'
+var fhirPrivateZoneName = 'privatelink.fhir.azurehealthcareapis.com'
+var appServicePrivateZoneName = 'privatelink.azurewebsites.net'
+
+resource pdzBlob 'Microsoft.Network/privateDnsZones@2020-06-01' = if (enablePrivateConnectivity) {
+  name: blobPrivateZoneName
+  location: 'global'
+}
+
+resource pdzKv 'Microsoft.Network/privateDnsZones@2020-06-01' = if (enablePrivateConnectivity) {
+  name: kvPrivateZoneName
+  location: 'global'
+}
+
+resource pdzCog 'Microsoft.Network/privateDnsZones@2020-06-01' = if (enablePrivateConnectivity) {
+  name: cognitivePrivateZoneName
+  location: 'global'
+}
+
+resource pdzFhir 'Microsoft.Network/privateDnsZones@2020-06-01' = if (enablePrivateConnectivity && shouldDeployFhirService) {
+  name: fhirPrivateZoneName
+  location: 'global'
+}
+
+resource pdzWeb 'Microsoft.Network/privateDnsZones@2020-06-01' = if (enablePrivateConnectivity) {
+  name: appServicePrivateZoneName
+  location: 'global'
+}
+
+resource pdzBlobLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = if (enablePrivateConnectivity) {
+  name: '${names.vnet}-link'
+  parent: pdzBlob
+  location: 'global'
+  properties: {
+    virtualNetwork: {
+      id: m_network.outputs.vnetId
+    }
+    registrationEnabled: false
+  }
+}
+
+resource pdzKvLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = if (enablePrivateConnectivity) {
+  name: '${names.vnet}-link'
+  parent: pdzKv
+  location: 'global'
+  properties: {
+    virtualNetwork: {
+      id: m_network.outputs.vnetId
+    }
+    registrationEnabled: false
+  }
+}
+
+resource pdzCogLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = if (enablePrivateConnectivity) {
+  name: '${names.vnet}-link'
+  parent: pdzCog
+  location: 'global'
+  properties: {
+    virtualNetwork: {
+      id: m_network.outputs.vnetId
+    }
+    registrationEnabled: false
+  }
+}
+
+resource pdzFhirLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = if (enablePrivateConnectivity && shouldDeployFhirService) {
+  name: '${names.vnet}-link'
+  parent: pdzFhir
+  location: 'global'
+  properties: {
+    virtualNetwork: {
+      id: m_network.outputs.vnetId
+    }
+    registrationEnabled: false
+  }
+}
+
+resource pdzWebLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = if (enablePrivateConnectivity) {
+  name: '${names.vnet}-link'
+  parent: pdzWeb
+  location: 'global'
+  properties: {
+    virtualNetwork: {
+      id: m_network.outputs.vnetId
+    }
+    registrationEnabled: false
+  }
+}
+
+resource peBlob 'Microsoft.Network/privateEndpoints@2023-05-01' = if (enablePrivateConnectivity) {
+  name: '${names.appStorage}-pe-blob'
+  location: location
+  properties: {
+    subnet: {
+      id: '${m_network.outputs.vnetId}/subnets/private-endpoints'
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'blob'
+        properties: {
+          privateLinkServiceId: m_appStorageAccount.outputs.storageAccountID
+          groupIds: [
+            'blob'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource peBlobZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2021-05-01' = if (enablePrivateConnectivity) {
+  name: 'zoneGroup'
+  parent: peBlob
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'blob'
+        properties: {
+          privateDnsZoneId: pdzBlob.id
+        }
+      }
+    ]
+  }
+}
+
+resource peKv 'Microsoft.Network/privateEndpoints@2023-05-01' = if (enablePrivateConnectivity) {
+  name: '${names.keyVault}-pe'
+  location: location
+  properties: {
+    subnet: {
+      id: '${m_network.outputs.vnetId}/subnets/private-endpoints'
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'vault'
+        properties: {
+          privateLinkServiceId: m_keyVault.outputs.keyVaultID
+          groupIds: [
+            'vault'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource peKvZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2021-05-01' = if (enablePrivateConnectivity) {
+  name: 'zoneGroup'
+  parent: peKv
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'vault'
+        properties: {
+          privateDnsZoneId: pdzKv.id
+        }
+      }
+    ]
+  }
+}
+
+// Private Endpoint for Azure AI Services (Cognitive Services)
+resource peCog 'Microsoft.Network/privateEndpoints@2023-05-01' = if (enablePrivateConnectivity) {
+  name: '${names.aiServices}-pe'
+  location: location
+  properties: {
+    subnet: {
+      id: '${m_network.outputs.vnetId}/subnets/private-endpoints'
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'cognitiveservices'
+        properties: {
+          privateLinkServiceId: m_aiservices.outputs.aiServicesID
+          groupIds: [ 'account' ]
+        }
+      }
+    ]
+  }
+}
+
+resource peCogZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2021-05-01' = if (enablePrivateConnectivity) {
+  name: 'zoneGroup'
+  parent: peCog
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'cognitiveservices'
+        properties: {
+          privateDnsZoneId: pdzCog.id
+        }
+      }
+    ]
+  }
+}
+
+// Private Endpoint for FHIR (AHDS) - if deployed in this template
+resource peFhir 'Microsoft.Network/privateEndpoints@2023-05-01' = if (enablePrivateConnectivity && shouldDeployFhirService) {
+  name: '${names.ahdsFhirServiceName}-pe'
+  location: location
+  properties: {
+    subnet: {
+      id: '${m_network.outputs.vnetId}/subnets/private-endpoints'
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'fhir'
+        properties: {
+          privateLinkServiceId: m_fhirService!.outputs.fhirServiceId
+          groupIds: [ 'fhir' ]
+        }
+      }
+    ]
+  }
+}
+
+resource peFhirZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2021-05-01' = if (enablePrivateConnectivity && shouldDeployFhirService) {
+  name: 'zoneGroup'
+  parent: peFhir
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'fhir'
+        properties: {
+          privateDnsZoneId: pdzFhir.id
+        }
+      }
+    ]
+  }
+}
+
+// Private Endpoint for App Service
+resource peWeb 'Microsoft.Network/privateEndpoints@2023-05-01' = if (enablePrivateConnectivity && !useFrontDoorForBots) {
+  name: '${names.app}-pe'
+  location: location
+  properties: {
+    subnet: {
+      id: '${m_network.outputs.vnetId}/subnets/private-endpoints'
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'sites'
+        properties: {
+          privateLinkServiceId: m_app.outputs.appServiceId
+          groupIds: [ 'sites' ]
+          requestMessage: 'Private access to App Service site'
+        }
+      }
+    ]
+  }
+}
+
+resource peWebZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2021-05-01' = if (enablePrivateConnectivity && !useFrontDoorForBots) {
+  name: 'zoneGroup'
+  parent: peWeb
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'azurewebsites'
+        properties: {
+          privateDnsZoneId: pdzWeb.id
+        }
+      }
+    ]
+  }
+}
+
 var shouldDeployFhirService = clinicalNotesSource == 'fhir' && empty(fhirServiceEndpoint)
 
 module m_fhirService 'modules/fhirService.bicep' = if (shouldDeployFhirService) {
@@ -411,10 +748,24 @@ module m_app 'modules/appservice.bicep' = {
     clinicalNotesSource: clinicalNotesSource
     fhirServiceEndpoint: fhirServiceEndpoint
     fabricUserDataFunctionEndpoint: fabricUserDataFunctionEndpoint
-    appServiceSubnetId: m_network.outputs.appServiceSubnetId
+    appServiceSubnetId: enablePrivateConnectivity ? m_network.outputs.appServiceSubnetId : ''
     additionalAllowedIps: additionalAllowedIps
     additionalAllowedTenantIds: additionalAllowedTenantIds
     additionalAllowedUserIds: additionalAllowedUserIds
+    deployerObjectId: myPrincipalId
+    sitePublicNetworkAccess: useFrontDoorForBots ? 'Disabled' : 'Enabled'
+  }
+}
+
+module m_frontdoor 'modules/frontdoor.bicep' = if (useFrontDoorForBots) {
+  name: 'deploy_frontdoor'
+  params: {
+    location: empty(appServiceLocation) ? location : appServiceLocation
+    profileName: '${environmentName}-${uniqueSuffix}-afd'
+    endpointName: '${environmentName}-${uniqueSuffix}-ep'
+    originHostName: m_app.outputs.backendHostName
+    originResourceId: m_app.outputs.appServiceId
+    tags: tags
   }
 }
 
@@ -423,7 +774,7 @@ module m_bot 'modules/botservice.bicep' = {
   params: {
     location: empty(botServiceLocation) ? location : botServiceLocation
     tags: tags
-    appBackend: m_app.outputs.backendHostName
+  appBackend: useFrontDoorForBots ? m_frontdoor!.outputs.frontDoorHostName : m_app.outputs.backendHostName
     bots: [
       for i in range(0, length(agents)): {
         msiClientID: m_msi[i].outputs.msiClientID
@@ -489,4 +840,27 @@ output KEYVAULT_ENDPOINT string = m_keyVault.outputs.keyVaultEndpoint
 output HEALTHCARE_AGENT_SERVICE_ENDPOINTS array = !empty(healthcareAgents) ? m_healthcareAgentService!.outputs.healthcareAgentServiceEndpoints : []
 output VNET_ID string = m_network.outputs.vnetId
 output VNET_NAME string = m_network.outputs.vnetName
-output APP_SERVICE_SUBNET_ID string = m_network.outputs.appServiceSubnetId
+output APP_SERVICE_SUBNET_ID string = enablePrivateConnectivity ? m_network.outputs.appServiceSubnetId : ''
+// Private DNS Zone names (when enabled)
+output PRIVATE_DNS_BLOB_ZONE string = enablePrivateConnectivity ? blobPrivateZoneName : ''
+output PRIVATE_DNS_KEYVAULT_ZONE string = enablePrivateConnectivity ? kvPrivateZoneName : ''
+output PRIVATE_DNS_COGSERV_ZONE string = enablePrivateConnectivity ? cognitivePrivateZoneName : ''
+output PRIVATE_DNS_FHIR_ZONE string = enablePrivateConnectivity && shouldDeployFhirService ? fhirPrivateZoneName : ''
+output PRIVATE_DNS_WEBSITES_ZONE string = enablePrivateConnectivity ? appServicePrivateZoneName : ''
+// Private Endpoint IPs
+output PE_STORAGE_ID string = enablePrivateConnectivity ? peBlob.id : ''
+output PE_KEYVAULT_ID string = enablePrivateConnectivity ? peKv.id : ''
+output PE_COGSERV_ID string = enablePrivateConnectivity ? peCog.id : ''
+output PE_FHIR_ID string = enablePrivateConnectivity && shouldDeployFhirService ? peFhir.id : ''
+output PE_WEBSITES_ID string = enablePrivateConnectivity ? peWeb.id : ''
+// VPN Gateway outputs (when enabled)
+var vpnGatewayName = '${names.vnet}-vpngw'
+var vpnGatewayPipName = '${names.vnet}-vpngw-pip'
+var dnsResolverName = '${names.vnet}-dnsres'
+
+output VPN_GATEWAY_ID string = deployP2SVpn ? resourceId('Microsoft.Network/virtualNetworkGateways', vpnGatewayName) : ''
+output VPN_GATEWAY_PUBLIC_IP_ID string = deployP2SVpn ? resourceId('Microsoft.Network/publicIPAddresses', vpnGatewayPipName) : ''
+output GATEWAY_SUBNET_ID string = deployP2SVpn ? '${m_network.outputs.vnetId}/subnets/GatewaySubnet' : ''
+output VPN_CLIENT_ADDRESS_POOL string = deployP2SVpn ? vpnClientAddressPool : ''
+output DNS_RESOLVER_ID string = deployDnsResolver ? resourceId('Microsoft.Network/dnsResolvers', dnsResolverName) : ''
+output DNS_INBOUND_ENDPOINT_ID string = deployDnsResolver ? resourceId('Microsoft.Network/dnsResolvers/inboundEndpoints', dnsResolverName, 'inbound') : ''

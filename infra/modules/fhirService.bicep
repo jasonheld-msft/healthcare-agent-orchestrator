@@ -71,3 +71,4 @@ resource fhirDataReaderAccess 'Microsoft.Authorization/roleAssignments@2022-04-0
 ]
 
 output endpoint string = audience
+output fhirServiceId string = fhirService.id

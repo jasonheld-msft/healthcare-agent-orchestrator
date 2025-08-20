@@ -5,6 +5,7 @@ param location string
 param keyVaultName string
 param tags object = {}
 param grantAccessTo array
+param enablePrivateConnectivity bool = false
 param additionalIdentities array = []
 param appServiceSubnetId string
 
@@ -27,11 +28,11 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enabledForTemplateDeployment: false
     enableSoftDelete: true
     enableRbacAuthorization: true
-    publicNetworkAccess: 'Disabled'
+    publicNetworkAccess: enablePrivateConnectivity ? 'Disabled' : 'Enabled'
     networkAcls: {
       bypass: 'AzureServices'
-      defaultAction: 'Deny'
-      virtualNetworkRules: [
+      defaultAction: enablePrivateConnectivity ? 'Deny' : 'Allow'
+      virtualNetworkRules: empty(appServiceSubnetId) ? [] : [
         {
           id: appServiceSubnetId
           ignoreMissingVnetServiceEndpoint: false

@@ -27,6 +27,9 @@ param appServiceSubnetId string
 param additionalAllowedIps string = ''
 param additionalAllowedTenantIds string
 param additionalAllowedUserIds string
+param deployerObjectId string = ''
+@description('Controls public network access to the App Service. Use Disabled when fronted by Front Door + Private Link.')
+param sitePublicNetworkAccess string = 'Enabled'
 
 var botIdsArray = [
   for (msi, index) in msis: {
@@ -124,11 +127,11 @@ resource backend 'Microsoft.Web/sites@2023-12-01' = {
   properties: {
     serverFarmId: appServicePlanId
     httpsOnly: true
-    virtualNetworkSubnetId: appServiceSubnetId
+    virtualNetworkSubnetId: empty(appServiceSubnetId) ? null : appServiceSubnetId
     siteConfig: {
       httpLoggingEnabled: true
       logsDirectorySizeLimit: 35
-      publicNetworkAccess: 'Enabled'
+  publicNetworkAccess: sitePublicNetworkAccess
       ipSecurityRestrictionsDefaultAction: 'Deny'
       ipSecurityRestrictions: ipSecurityRestrictions
       scmIpSecurityRestrictionsDefaultAction: 'Allow'
@@ -137,7 +140,7 @@ resource backend 'Microsoft.Web/sites@2023-12-01' = {
       webSocketsEnabled: true
       appCommandLine: 'gunicorn app:app'
       alwaysOn: true
-      vnetRouteAllEnabled: true
+      vnetRouteAllEnabled: empty(appServiceSubnetId) ? false : true
     }
     keyVaultReferenceIdentity: msis[0].msiID
   }
@@ -175,7 +178,7 @@ resource backEndNameSiteConfig 'Microsoft.Web/sites/config@2024-04-01' = {
   properties: {
     MicrosoftAppType: 'UserAssignedMSI'
     AZURE_CLIENT_ID: msis[0].msiClientID
-    AZURE_DEPLOYER_OBJECT_ID: deployer().objectId
+    AZURE_DEPLOYER_OBJECT_ID: deployerObjectId
     MicrosoftAppTenantId: tenant().tenantId
     ADDITIONAL_ALLOWED_TENANT_IDS: additionalAllowedTenantIds
     ADDITIONAL_ALLOWED_USER_IDS: additionalAllowedUserIds
@@ -204,3 +207,4 @@ resource backEndNameSiteConfig 'Microsoft.Web/sites/config@2024-04-01' = {
 output backendHostName string = backend.properties.defaultHostName
 output botIds object = botIds
 output modelEndpoints object = modelEndpoints
+output appServiceId string = backend.id

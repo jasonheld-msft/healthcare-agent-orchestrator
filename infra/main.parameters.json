@@ -113,6 +113,27 @@
         "Environment": "Dev",
         "Toolkit": "Bicep"
       }
+    },
+    "enablePrivateConnectivity": {
+      "value": "${ENABLE_PRIVATE_CONNECTIVITY}"
+    },
+    "deployP2SVpn": {
+      "value": "${deployP2SVpn}"
+    },
+    "vpnGatewaySku": {
+      "value": "${vpnGatewaySku}"
+    },
+    "vpnClientAddressPool": {
+      "value": "${vpnClientAddressPool}"
+    },
+    "vpnRootCertName": {
+      "value": "${vpnRootCertName}"
+    },
+    "vpnRootCertData": {
+      "value": "${vpnRootCertData}"
+    },
+    "deployDnsResolver": {
+      "value": "${deployDnsResolver}"
     }
   }
 }

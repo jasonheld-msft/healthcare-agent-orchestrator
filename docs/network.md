@@ -221,3 +221,152 @@ For detailed implementation guidance, refer to the following resources:
 - [VPN Gateway setup instructions](https://docs.microsoft.com/azure/vpn-gateway/)
 
 The example enhanced private architecture provides a potential foundation for healthcare application hosting in Azure while maintaining compliance with industry standards and regulations.
+
+## Using private connectivity and P2S VPN
+
+This project supports two switches that harden network access and enable private developer connectivity:
+
+- ENABLE_PRIVATE_CONNECTIVITY: Locks down platform services behind Private Endpoints and Private DNS.
+- deployP2SVpn: (Optional) Provisions a Point‑to‑Site (P2S) VPN Gateway so developers can securely reach private resources from their machines.
+
+### What ENABLE_PRIVATE_CONNECTIVITY does
+
+When set to true, the deployment:
+
+- Creates a dedicated `private-endpoints` subnet and Private Endpoints for:
+  - Storage (blob)
+  - Key Vault
+  - Cognitive Services (AI Services)
+  - App Service (sites)
+  - FHIR (only if the template deploys FHIR)
+- Creates and links Private DNS zones to the VNet:
+  - privatelink.blob.core.windows.net
+  - privatelink.vaultcore.azure.net
+  - privatelink.cognitiveservices.azure.com
+  - privatelink.fhir.azurehealthcareapis.com (if used)
+  - privatelink.azurewebsites.net
+- Disables public network access on Storage, Key Vault, and Cognitive Services.
+- App Service becomes reachable via its Private Endpoint (privatelink) instead of public internet.
+
+Enable with azd:
+
+```bash
+azd env set ENABLE_PRIVATE_CONNECTIVITY true
+azd up
+```
+
+Alternatively, set in `infra/main.parameters.json`:
+
+```json
+"enablePrivateConnectivity": {
+  "value": true
+}
+```
+
+### Optional: Enable P2S VPN for developer access
+
+If you don’t have an existing corporate VPN and need local access to private resources (App Service, Key Vault, Storage, AI Services, FHIR), enable the built‑in P2S VPN Gateway:
+
+1. Provide a root certificate (certificate auth)
+
+On macOS you can generate a root cert and export a Base64 public cert:
+
+```bash
+# Generate a root key and self‑signed root certificate (valid 10 years)
+openssl genrsa -out rootCA.key 4096
+openssl req -x509 -new -nodes -key rootCA.key -sha256 -days 3650 -out rootCA.crt -subj "/CN=Healthcare Orchestrator VPN Root"
+
+# Export a DER‑encoded .cer (public cert), then Base64 encode its contents
+openssl x509 -in rootCA.crt -outform der -out rootCA.cer
+BASE64_CERT=$(openssl base64 -A -in rootCA.cer)
+```
+
+1. Set the VPN parameters and deploy
+
+```bash
+azd env set deployP2SVpn true
+azd env set vpnRootCertName "HealthcareOrchestratorRoot"
+azd env set vpnRootCertData "$BASE64_CERT"
+
+# Optional: adjust gateway SKU and client address pool
+azd env set vpnGatewaySku VpnGw1
+azd env set vpnClientAddressPool 172.16.0.0/24
+
+azd up
+```
+
+Provisioning a VPN gateway typically takes 30–45 minutes.
+
+1. Create a client certificate for your user (sign with the root) and import into your macOS Keychain, then use OpenVPN/Tunnelblick with the client profile to connect. See Azure P2S OpenVPN documentation for generating the client profile and importing the cert.
+
+```bash
+openssl genrsa -out client-vpn.key 4096
+openssl req -new -key client-vpn.key -out client-vpn.csr -subj "/CN=$(whoami)"
+
+openssl x509 -req -in client-vpn.csr -CA rootCA.crt -CAkey rootCA.key -CAcreateserial -out client-vpn.crt -days 365 -sha256
+```
+
+### Optional: DNS Private Resolver (toggle via deployDnsResolver)
+
+For P2S clients to resolve privatelink hostnames over the VPN without host file hacks, deploy the Azure DNS Private Resolver. This module is included in the Bicep but is gated by the deployDnsResolver parameter (default: false).
+
+Enable with azd:
+
+```bash
+azd env set deployDnsResolver true
+azd up
+```
+
+Verify resources:
+
+```bash
+az network dns-resolver list -g rg-hco-no-radiology -o table
+az network dns-resolver inbound-endpoint list -g rg-hco-no-radiology -o table
+```
+
+Use the inbound endpoint IP in your OpenVPN/Tunnelblick profile via `dhcp-option DNS <ip>` and add DOMAIN-ROUTE entries for privatelink zones (see the client DNS configuration section below).
+
+### DNS for Private Endpoints (important)
+
+To resolve privatelink hostnames from your machine over VPN, configure DNS:
+
+- Preferred: Use Azure DNS Private Resolver or a custom DNS VM in the VNet. Configure your VPN to hand out that DNS server and set conditional forwarders for:
+  - privatelink.azurewebsites.net
+  - privatelink.blob.core.windows.net
+  - privatelink.vaultcore.azure.net
+  - privatelink.cognitiveservices.azure.com
+  - privatelink.fhir.azurehealthcareapis.com (if used)
+- Temporary workaround: Map your app host to its Private Endpoint IP in `/etc/hosts` for quick testing. Prefer DNS for ongoing work.
+
+### Verifying private connectivity
+
+After deployment (and VPN + DNS setup):
+
+- DNS
+  - `nslookup <yourapp>.azurewebsites.net` should CNAME to `privatelink.azurewebsites.net` and resolve to a 10.x IP.
+  - `nslookup <storage>.blob.core.windows.net` should return a privatelink A record (10.x).
+- App Service
+  - `curl -I https://<yourapp>.azurewebsites.net` should succeed over the private path.
+- SDK/CLI
+  - Azure SDK/CLI calls to Key Vault, Storage, Cognitive Services should succeed only when connected to the VPN/private network.
+
+### Useful deployment outputs
+
+The deployment emits helpful outputs to validate and integrate networking:
+
+- Private DNS zones:
+  - `PRIVATE_DNS_BLOB_ZONE`, `PRIVATE_DNS_KEYVAULT_ZONE`, `PRIVATE_DNS_COGSERV_ZONE`, `PRIVATE_DNS_FHIR_ZONE`, `PRIVATE_DNS_WEBSITES_ZONE`
+- Private Endpoint IDs:
+  - `PE_STORAGE_ID`, `PE_KEYVAULT_ID`, `PE_COGSERV_ID`, `PE_FHIR_ID`, `PE_WEBSITES_ID`
+- VNet and subnets:
+  - `VNET_ID`, `APP_SERVICE_SUBNET_ID`, and when VPN is enabled: `GATEWAY_SUBNET_ID`
+- VPN gateway (when enabled):
+  - `VPN_GATEWAY_ID`, `VPN_GATEWAY_PUBLIC_IP_ID`, `VPN_CLIENT_ADDRESS_POOL`
+
+You can view outputs in the azd deployment logs or in the Azure Portal under the deployment record for the resource group.
+
+### Troubleshooting
+
+- Timeouts/403 to private services: Ensure the VPN is connected and DNS resolves to 10.x addresses.
+- App Service not reachable publicly: With App Service PE enabled, use VPN or front it with Application Gateway/Front Door.
+- DNS doesn’t resolve: Add a DNS forwarder (Azure DNS Private Resolver or custom DNS VM) and configure your VPN to use it; avoid relying on `/etc/hosts` long‑term.

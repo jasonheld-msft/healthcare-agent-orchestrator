@@ -34,6 +34,8 @@ param subnets array = [
   }
 ]
 
+// (Subnets for VPN gateway and DNS resolver are managed by their respective modules.)
+
 @description('Tags for network resources')
 param tags object = {}
 
@@ -56,28 +58,30 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
     addressSpace: {
       addressPrefixes: vnetAddressPrefixes
     }
-    subnets: [
-      for (subnet, i) in subnets: {
-        name: subnet.name
-        properties: {
-          addressPrefix: subnet.addressPrefix
-          networkSecurityGroup: {
-            id: nsg[i].id
-          }
-          delegations: subnet.delegation != '' ? [
-            {
-              name: subnet.delegation
-              properties: {
-                serviceName: subnet.delegation
-              }
-            }
-          ] : []
-          serviceEndpoints: subnet.serviceEndpoints
-        }
-      }
-    ]
   }
 }
+
+resource vnetSubnets 'Microsoft.Network/virtualNetworks/subnets@2023-09-01' = [for (subnet, i) in subnets: if (toLower(subnet.name) != 'appservice-subnet') {
+  name: subnet.name
+  parent: vnet
+  properties: {
+    addressPrefix: subnet.addressPrefix
+    networkSecurityGroup: {
+  // nsg index based on original subnets array
+  id: nsg[indexOf(subnets, subnet)].id
+    }
+    delegations: subnet.delegation != '' ? [
+      {
+        name: subnet.delegation
+        properties: {
+          serviceName: subnet.delegation
+        }
+      }
+    ] : []
+    privateEndpointNetworkPolicies: subnet.?privateEndpointNetworkPolicies ?? 'Enabled'
+    serviceEndpoints: subnet.serviceEndpoints
+  }
+}]
 
 output vnetId string = vnet.id
 output vnetName string = vnet.name
@@ -85,4 +89,4 @@ output subnetIds array = [for i in range(0, length(subnets)): '${vnet.id}/subnet
 output subnetNames array = [for subnet in subnets: subnet.name]
 output appServiceSubnetId string = '${vnet.id}/subnets/${subnets[0].name}' // First subnet is assumed to be app service subnet
 output nsgIds array = [for i in range(0, length(subnets)): nsg[i].id]
-
+// Subnets for VPN gateway and DNS resolver are produced by their modules; no outputs here

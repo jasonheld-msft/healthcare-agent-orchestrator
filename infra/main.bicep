@@ -14,8 +14,15 @@ param myPrincipalType string
 param tags object = {}
 @description('Enable private connectivity (VNet integration and restricted access). When true, services lock down to VNet.')
 param enablePrivateConnectivity bool = false
-@description('Route Teams/Bot ingress via Azure Front Door with Private Link to App Service. Disables App Service Private Endpoint and sets site public access to Disabled.')
-param useFrontDoorForBots bool = false
+@description('Route Teams/Bot ingress via Azure Application Gateway with Private Link to App Service. Disables App Service public access and uses App Gateway public FQDN for Bot Service messaging endpoint.')
+param useAppGatewayForBots bool = false
+@description('Optional DNS label for the Application Gateway public IP. If empty, a label is generated.')
+param appGatewayDnsLabel string = ''
+@description('Key Vault secret ID for a PFX certificate to enable HTTPS on Application Gateway listener. Required if useAppGatewayForBots is true for Bot Framework HTTPS endpoint compliance.')
+@secure()
+param appGatewayCertSecretId string = ''
+@description('Health probe path for Application Gateway. Defaults to "/"; you can set to a health endpoint or /api/{bot}/messages.')
+param appGatewayProbePath string = '/'
 
 // AI Services configurations
 @description('Name of the AI Services account. Automatically generated if left blank')
@@ -205,7 +212,9 @@ param subnets array = [
   }
 ]
 
-var effectiveSubnets = enablePrivateConnectivity ? concat(subnets, [
+// Build subnet list dynamically to include private endpoints and (optionally) an Application Gateway subnet
+var _baseSubnets = subnets
+var _withPeSubnets = enablePrivateConnectivity ? concat(_baseSubnets, [
   {
     name: 'private-endpoints'
     addressPrefix: '10.0.2.0/24'
@@ -214,7 +223,16 @@ var effectiveSubnets = enablePrivateConnectivity ? concat(subnets, [
     securityRules: []
     privateEndpointNetworkPolicies: 'Disabled'
   }
-]) : subnets
+]) : _baseSubnets
+var effectiveSubnets = useAppGatewayForBots ? concat(_withPeSubnets, [
+  {
+    name: 'appgateway-subnet'
+    addressPrefix: '10.0.3.0/24'
+    delegation: ''
+    serviceEndpoints: []
+    securityRules: []
+  }
+]) : _withPeSubnets
 
 var names = {
   msi: !empty(msiName) ? msiName : '${abbrs.managedIdentityUserAssignedIdentities}${environmentName}-${uniqueSuffix}'
@@ -229,6 +247,7 @@ var names = {
   ahdsWorkspaceName: replace('ahds${environmentName}${uniqueSuffix}', '-', '')
   ahdsFhirServiceName: replace('fhir${environmentName}${uniqueSuffix}', '-', '')
   vnet: !empty(vnetName) ? vnetName : '${abbrs.networkVirtualNetworks}${environmentName}-${uniqueSuffix}'
+  appGateway: 'agw-${environmentName}-${uniqueSuffix}'
 
 }
 
@@ -656,7 +675,7 @@ resource peFhirZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroup
 }
 
 // Private Endpoint for App Service
-resource peWeb 'Microsoft.Network/privateEndpoints@2023-05-01' = if (enablePrivateConnectivity && !useFrontDoorForBots) {
+resource peWeb 'Microsoft.Network/privateEndpoints@2023-05-01' = if (enablePrivateConnectivity) {
   name: '${names.app}-pe'
   location: location
   properties: {
@@ -676,7 +695,7 @@ resource peWeb 'Microsoft.Network/privateEndpoints@2023-05-01' = if (enablePriva
   }
 }
 
-resource peWebZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2021-05-01' = if (enablePrivateConnectivity && !useFrontDoorForBots) {
+resource peWebZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2021-05-01' = if (enablePrivateConnectivity) {
   name: 'zoneGroup'
   parent: peWeb
   properties: {
@@ -753,18 +772,22 @@ module m_app 'modules/appservice.bicep' = {
     additionalAllowedTenantIds: additionalAllowedTenantIds
     additionalAllowedUserIds: additionalAllowedUserIds
     deployerObjectId: myPrincipalId
-    sitePublicNetworkAccess: useFrontDoorForBots ? 'Disabled' : 'Enabled'
+  sitePublicNetworkAccess: useAppGatewayForBots ? 'Disabled' : 'Enabled'
   }
 }
 
-module m_frontdoor 'modules/frontdoor.bicep' = if (useFrontDoorForBots) {
-  name: 'deploy_frontdoor'
+module m_appgateway 'modules/appgateway.bicep' = if (useAppGatewayForBots) {
+  name: 'deploy_appgateway'
   params: {
     location: empty(appServiceLocation) ? location : appServiceLocation
-    profileName: '${environmentName}-${uniqueSuffix}-afd'
-    endpointName: '${environmentName}-${uniqueSuffix}-ep'
-    originHostName: m_app.outputs.backendHostName
-    originResourceId: m_app.outputs.appServiceId
+    appGatewayName: names.appGateway
+    vnetId: m_network.outputs.vnetId
+    subnetName: 'appgateway-subnet'
+    backendHostName: m_app.outputs.backendHostName
+    publicDnsLabel: empty(appGatewayDnsLabel) ? toLower(replace('${environmentName}-${uniqueSuffix}-agw', '_', '-')) : appGatewayDnsLabel
+  keyVaultCertSecretId: appGatewayCertSecretId
+  // Health probe path for backend
+  probePath: appGatewayProbePath
     tags: tags
   }
 }
@@ -774,7 +797,7 @@ module m_bot 'modules/botservice.bicep' = {
   params: {
     location: empty(botServiceLocation) ? location : botServiceLocation
     tags: tags
-  appBackend: useFrontDoorForBots ? m_frontdoor!.outputs.frontDoorHostName : m_app.outputs.backendHostName
+  appBackend: useAppGatewayForBots ? m_appgateway!.outputs.publicFqdn : m_app.outputs.backendHostName
     bots: [
       for i in range(0, length(agents)): {
         msiClientID: m_msi[i].outputs.msiClientID

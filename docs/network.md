@@ -136,6 +136,56 @@ For production healthcare environments, organizations may consider upgrading to 
 - Private DNS integration for seamless connectivity
 - Enhanced compliance with healthcare data protection requirements
 
+#### Ensuring Teams/Bot Framework reach a private App Service
+
+When App Service is made private via a Private Endpoint, Microsoft Teams still reaches your bot through the Azure Bot Framework Service (BFS). Because BFS requires a public HTTPS endpoint, you need a public edge that terminates TLS and connects privately to App Service. This project supports Azure Application Gateway for that purpose.
+
+Supported option (Application Gateway + Private Link)
+
+- Publish a public listener with WAF policy
+- Backend pool: App Service via Private Link (privatelink.azurewebsites.net)
+- HTTP settings: SNI enabled, host header pick from backend address, TLS to backend
+- Health probe path: use `/` (default) or point to a health endpoint; optionally set to `/api/{bot}/messages`
+- Bot Service messaging endpoint points to the Application Gateway public FQDN
+
+Validation checklist
+
+- Teams chat to the bot works end-to-end
+- Bot Framework Service → Application Gateway → App Service (private) succeeds
+- DNS: the App Service default host CNAME resolves to privatelink.azurewebsites.net inside the VNet; Application Gateway reaches it privately
+- App Insights logs show authenticated BFS calls hitting /api/{bot}/messages
+
+Quick azd toggles
+
+```bash
+azd env set ENABLE_PRIVATE_CONNECTIVITY true
+azd env set useAppGatewayForBots true
+azd up
+```
+
+Configuring Application Gateway parameters
+
+- DNS label for public IP (creates \<label\>.\<region\>.cloudapp.azure.com): set `APPGATEWAY_DNS_LABEL`
+- HTTPS certificate: upload a PFX to Key Vault as a secret and set `APPGATEWAY_CERT_SECRET_ID` to the full secret ID
+  - Example secret ID format: `/subscriptions/\<sub\>/resourceGroups/\<rg\>/providers/Microsoft.KeyVault/vaults/\<kv\>/secrets/\<secretName\>/\<version\>`
+- Health probe path (optional): set `APPGATEWAY_PROBE_PATH` to `/` (default), a health endpoint, or `/api/{bot}/messages`
+
+Example
+
+```bash
+# Set DNS label
+azd env set APPGATEWAY_DNS_LABEL myorchestratorbot
+
+# Upload PFX to Key Vault (use Azure Portal or CLI) and set the secret ID
+azd env set APPGATEWAY_CERT_SECRET_ID \
+  "/subscriptions/\<sub\>/resourceGroups/\<rg\>/providers/Microsoft.KeyVault/vaults/\<kv\>/secrets/\<secret\>/\<version\>"
+
+# Optional probe path tuning
+azd env set APPGATEWAY_PROBE_PATH "/"
+
+azd up
+```
+
 
 ### Architecture Components Overview
 
@@ -144,14 +194,16 @@ The following sections outline the key network components and configurations tha
 #### Application Gateway Configuration
 
 **Subnet Requirements**:
+
 - Address prefix: `10.0.2.0/24`
 - Dedicated subnet for Application Gateway deployment
 - No delegation required
 - Specific NSG rules for Application Gateway traffic
-- Private DNS Zones: Configure  `privatelink.azurewebsites.net` and related zones for private endpoint and vpn name resolution
-- Backed Pool Targets: use private endpoint ip's. 
+- Private DNS Zones: Configure  `privatelink.azurewebsites.net` and related zones for private endpoint and VPN name resolution
+  - Backend pool targets: use the App Service default FQDN; Application Gateway connects privately via Private Link
 
 **SSL/TLS Configuration**:
+
 - Frontend HTTPS endpoint with public-facing access
 - Backend communication secured between Application Gateway and App Service
 - Certificate management integrated with Azure Key Vault
@@ -159,11 +211,13 @@ The following sections outline the key network components and configurations tha
 #### Private Endpoints Subnet Configuration
 
 **Subnet Setup**:
+
 - Address prefix: `10.0.3.0/24`
 - Dedicated subnet for private endpoint network interfaces
 - Network policies configured to support private endpoint deployments
 
 **Private DNS Zones Configuration**:
+
 - Key Vault: `privatelink.vaultcore.azure.net`
 - Storage: `privatelink.blob.core.windows.net`
 - Cognitive Services: `privatelink.cognitiveservices.azure.com`
@@ -173,12 +227,14 @@ The following sections outline the key network components and configurations tha
 When implementing private App Service deployment, organizations must establish secure access methods for development and maintenance activities. The following options address the connectivity requirements:
 
 **VPN Gateway (Point-to-Site)**:
+
 - Subnet: `10.0.4.0/26` (GatewaySubnet)
 - Certificate-based authentication
 - Point-to-site VPN configuration
 - Enables secure remote access for development teams
 
 **Azure Bastion**:
+
 - Subnet: `10.0.5.0/26` (AzureBastionSubnet)
 - Browser-based secure access
 - Managed jump box service
@@ -201,7 +257,9 @@ Organizations may want to consider the following prerequisites when planning enh
 ### Developer Workflow Considerations
 
 **Potential Impact**: Private App Service deployment would change developer access patterns
+
 **Example Mitigation Strategies**:
+
 - Implementing automated CI/CD pipelines to reduce manual access requirements
 - Providing VPN access for necessary debugging and troubleshooting
 - Using Azure Bastion for secure administrative access
@@ -368,5 +426,5 @@ You can view outputs in the azd deployment logs or in the Azure Portal under the
 ### Troubleshooting
 
 - Timeouts/403 to private services: Ensure the VPN is connected and DNS resolves to 10.x addresses.
-- App Service not reachable publicly: With App Service PE enabled, use VPN or front it with Application Gateway/Front Door.
+- App Service not reachable publicly: With App Service PE enabled, use VPN or front it with Application Gateway.
 - DNS doesn’t resolve: Add a DNS forwarder (Azure DNS Private Resolver or custom DNS VM) and configure your VPN to use it; avoid relying on `/etc/hosts` long‑term.

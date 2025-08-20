@@ -135,5 +135,18 @@
     "deployDnsResolver": {
       "value": "${deployDnsResolver}"
     }
+    ,
+    "useAppGatewayForBots": {
+      "value": "${useAppGatewayForBots}"
+    },
+    "appGatewayDnsLabel": {
+      "value": "${APPGATEWAY_DNS_LABEL}"
+    },
+    "appGatewayCertSecretId": {
+      "value": "${APPGATEWAY_CERT_SECRET_ID}"
+    },
+    "appGatewayProbePath": {
+      "value": "${APPGATEWAY_PROBE_PATH}"
+    }
   }
 }
